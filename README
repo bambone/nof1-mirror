@@ -1,0 +1,18 @@
+# скопируйте config/nof1_bybit.example.php → config/nof1_bybit.local.php и вставьте свои ключи
+
+# NOF1 DeepSeek → Bybit Mirror (PHP)
+
+Зеркалит позиции модели **deepseek-chat-v3.1** с nof1.ai на **Bybit Linear USDT Perpetual**.
+
+## Установка
+```bash
+composer install
+cp config/nof1_bybit.example.php config/nof1_bybit.local.php
+# впишите ключи Bybit в .local.php
+
+# звпуск
+php cli/follow_deepseek.php
+
+
+# Скрипты
+cli/test_bybit_keys.php — проверка доступа к API

@@ -1,0 +1,14 @@
+{
+  "name": "mirror/nof1-deepseek-bybit",
+  "type": "project",
+  "require": {
+    "php": ">=8.1",
+    "guzzlehttp/guzzle": "^7.9",
+    "ext-json": "*"
+  },
+  "autoload": {
+    "psr-4": {
+      "Mirror\\": "src/"
+    }
+  }
+}

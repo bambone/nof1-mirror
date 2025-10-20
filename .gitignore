@@ -1,0 +1,9 @@
+/vendor/
+/var/
+/config/nof1_bybit.local.php
+/.idea/
+/.env
+composer.lock
+.osp
+getPositions('linear'
+log_cron.txt
