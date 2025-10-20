@@ -1,18 +1,56 @@
-# скопируйте config/nof1_bybit.example.php → config/nof1_bybit.local.php и вставьте свои ключи
-
 # NOF1 DeepSeek → Bybit Mirror (PHP)
 
-Зеркалит позиции модели **deepseek-chat-v3.1** с nof1.ai на **Bybit Linear USDT Perpetual**.
+Бот-зеркало, который синхронизирует реальные позиции модели  
+**DeepSeek Chat v3.1** с платформы [nof1.ai](https://nof1.ai)  
+на **Bybit Linear USDT Perpetual** (Unified Trading Account).
 
-## Установка
+---
+
+## ⚙️ Возможности
+- Каждую секунду опрашивает публичный API nof1.ai.  
+- Автоматически открывает, уменьшает или закрывает позиции в Bybit, повторяя DeepSeek.  
+- Устанавливает TP и SL, если они заданы в exit plan.  
+- Поддерживает ограничение по размеру позиции (`per_symbol_max_notional`).  
+- Логи в реальном времени с обновлением каждые 1 секунду.  
+
+---
+
+## 🧩 Установка
+
 ```bash
+git clone https://github.com/bambone/nof1-mirror.git
+cd nof1-mirror
 composer install
 cp config/nof1_bybit.example.php config/nof1_bybit.local.php
-# впишите ключи Bybit в .local.php
 
-# звпуск
+
+# Запуск
+# Проверка подключения и ключей
+php cli/test_bybit_keys.php
+
+# Установка плеча
+php cli/set_leverage.php
+
+# Основной бот
 php cli/follow_deepseek.php
 
 
-# Скрипты
-cli/test_bybit_keys.php — проверка доступа к API
+# Структура проекта
+cli/
+  follow_deepseek.php     # основной цикл синхронизации
+  test_bybit_keys.php     # проверка ключей
+  set_leverage.php        # установка плеча
+config/
+  nof1_bybit.example.php  # шаблон конфига (без ключей)
+  nof1_bybit.local.php    # твой приватный конфиг (в .gitignore)
+src/
+  Infra/BybitClient.php   # обёртка Bybit REST v5
+  App/Reconciler.php      # синхронизация позиций
+  App/Mapper.php          # вспомогательные функции
+  App/Quantizer.php       # округление qty
+var/
+  deepseek_follow.log     # логи (если включено)
+
+
+# Лицензия
+MIT License © 2025 Andrey Dupliakin (bambone)
