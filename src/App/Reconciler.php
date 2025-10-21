@@ -153,11 +153,11 @@ final class Reconciler
         // ===== 9) Флип стороны при расхождении (ONE_WAY) =====
         if ($curQty > 0 && (($curSide === 'Buy' && $side === 'Sell') || ($curSide === 'Sell' && $side === 'Buy'))) {
             $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
-            // действие → в файл
             $this->log->action("🔁 FLIP {$bybitSymbol}: close {$curQty} side={$closeSide}");
             $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $curQty, $closeSide, self::clid('FLIP', $bybitSymbol));
-            // ответ — только в консоль
-            $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
+            $ok = (($resp['retCode'] ?? -1) === 0);
+            $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
+            $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP')); // подробности — в консоль
             $curQty = 0.0;
         }
 
@@ -202,19 +202,37 @@ final class Reconciler
 
         if (abs($diffQty) > $tol) {
             if ($diffQty > 0) {
+                // --- ПРОВЕРКА МИНИМАЛЬНОГО НОМИНАЛА ПЕРЕД OPEN ---
+                $minNotional = (float)($this->cfg['bybit']['account']['min_order_value_usd'] ?? 5.0);
+                if ($last > 0) {
+                    $notional = $diffQty * $last;
+                    if ($notional < $minNotional) {
+                        $this->log->debug(sprintf(
+                            'skip %s: notional %.4f < min %.2f (qty=%.8f, last=%.8f)',
+                            $bybitSymbol, $notional, $minNotional, $diffQty, $last
+                        ));
+                        return; // не пытаемся отправлять, иначе Bybit откажет
+                    }
+                }
+
                 $this->log->action("📈 OPEN {$side} {$bybitSymbol} qty={$diffQty}");
                 $resp = $this->bybit->placeMarketOrder($cat, $bybitSymbol, $side, $diffQty, self::clid('ADD', $bybitSymbol));
+                $ok = (($resp['retCode'] ?? -1) === 0);
+                $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
                 $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
 
-                if (($resp['retCode'] ?? -1) === 0 && $entryOid !== '') {
+                if ($ok && $entryOid !== '') {
                     $this->state->set($bybitSymbol, 'joined', true);
                     $this->state->set($bybitSymbol, 'last_entry_oid', $entryOid);
                 }
             } else {
+                // reduce
                 $closeSide = $side === 'Buy' ? 'Sell' : 'Buy';
                 $abs = abs($diffQty);
                 $this->log->action("📉 REDUCE {$bybitSymbol} qty={$abs} side={$closeSide}");
                 $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $abs, $closeSide, self::clid('REDUCE', $bybitSymbol));
+                $ok = (($resp['retCode'] ?? -1) === 0);
+                $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
                 $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
             }
         } else {
@@ -261,7 +279,10 @@ final class Reconciler
                     if ($curQty > 0) {
                         $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
                         $this->log->action("🧹 CLOSE {$bybitSymbol} qty={$curQty} side={$closeSide} (absent in NOF1)");
-                        $this->bybit->closeMarket($cat, $bybitSymbol, $curQty, $closeSide, self::clid('CLOSE', $bybitSymbol));
+                        $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $curQty, $closeSide, self::clid('CLOSE', $bybitSymbol));
+                        $ok = (($resp['retCode'] ?? -1) === 0);
+                        $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
+                        $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
                         $this->state->set($bybitSymbol, 'joined', false);
                     }
                 }

@@ -55,6 +55,38 @@ $bybit = new BybitClient(
     $cfg['bybit']['api_secret']
 );
 
+/**
+ * ---------- ensure leverage (one-time) ----------
+ * На Bybit без заранее выставленного плеча по символу
+ * первый ордер может быть отклонён. Выставляем buy/sell одинаково.
+ * Ошибки не фатальные — просто предупреждаем.
+ */
+(function () use ($cfg, $bybit, $log) {
+    $cat     = $cfg['bybit']['account']['category'] ?? 'linear';
+    $lev     = (int)($cfg['bybit']['account']['leverage_default'] ?? 0);
+    $symbols = $cfg['bybit']['symbol_map'] ?? [];
+
+    if ($lev <= 0 || !$symbols) {
+        $log->debug('skip leverage init: leverage_default not set or no symbols');
+        return;
+    }
+
+    $log->info("🛠  Setting leverage={$lev}x for mapped symbols…");
+    foreach ($symbols as $nof1 => $bybitSymbol) {
+        try {
+            $resp = $bybit->setLeverage($cat, $bybitSymbol, $lev, $lev);
+            if (($resp['retCode'] ?? 1) === 0) {
+                $log->info("   ✅ {$bybitSymbol}: leverage set to {$lev}x");
+            } else {
+                $log->warn("   ⚠️ {$bybitSymbol}: leverage set failed: " . ($resp['retMsg'] ?? 'UNKNOWN'));
+            }
+        } catch (\Throwable $e) {
+            $log->warn("   ⚠️ {$bybitSymbol}: leverage set exception: " . $e->getMessage());
+        }
+    }
+    $log->info('🛠  Leverage init done.');
+})();
+
 $recon = new Reconciler($bybit, $cfg, $state, $log);
 
 // ---------- graceful shutdown ----------
@@ -123,7 +155,7 @@ while ($running) {
                 $conf  = $pos['confidence'] ?? '—';
                 $log->debug("→ {$sym}: entry={$entry} qty={$qty} lev={$lev} conf={$conf}");
 
-                // Синхронизация по символу (действия логируются внутри как notice)
+                // Синхронизация по символу (действия логируются внутри как notice/action)
                 $recon->syncSymbol($sym, $pos, $symbolMap);
             }
         }
@@ -132,7 +164,7 @@ while ($running) {
             $log->warn("⚠️ Model block '{$targetModel}' not found in positions payload.");
         }
 
-        // 4) Закрываем то, чего нет у модели (внутри — notice)
+        // 4) Закрываем то, чего нет у модели (внутри — action)
         $recon->closeAbsentSymbols($present, $symbolMap);
 
         // итог тика — шум

@@ -105,4 +105,45 @@ return [
         'rejoin_better_than_entry_pct' => 1.0,  // если включено — входить только на ≥1% лучше цены entry
         'max_entry_age_min'           => 120,  // разрешать перезаход, только если entry моложе N минут
     ],
+
+    // скальп-аддон (доп. модуль)
+    'scalp' => [
+        'enabled' => false,            // ← вкл/выкл модуль одним флагом
+
+        // риск/лимиты
+        'per_trade_notional_cap' => 5.0,   // размер одной скальп-сделки (в USD)
+        'min_free_balance_usd'   => 15.0,  // не входить, если доступно меньше этой суммы
+        'max_concurrent_scalps'  => 1,
+
+        // комиссии/оценка edge (подставь свои реальные комиссии!)
+        'fees' => [
+            'maker' => 0.00020,        // 0.02%
+            'taker' => 0.00055,        // 0.055%
+            'slippage_bp' => 2.0       // 2 б.п. допуск на слиппедж при оценке входа
+        ],
+
+        // базовая логика сигналов (можно будет детальнее настроить позже)
+        'vol' => [
+            'atr_tf'  => '1m',
+            'atr_len' => 14,
+            'k_pullback_min' => 0.6,
+            'k_pullback_max' => 1.2,
+        ],
+        'double_touch' => [
+            'win_seconds'     => 600,
+            'min_gap_candles' => 6,
+            'eps_ticks'       => 2,
+            'rsi_len'         => 7,
+        ],
+        'entry' => [
+            'trigger_delta_ticks' => 1,
+            'post_only_wait_ms'   => 250,
+        ],
+        'targets' => [
+            'sl_k_atr'   => 0.5,
+            'tp_k_atr'   => 0.6,
+            'be_k_atr'   => 0.3,
+            'trail_k_atr' => 0.3
+        ],
+    ],
 ];

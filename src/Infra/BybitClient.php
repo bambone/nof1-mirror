@@ -168,4 +168,26 @@ final class BybitClient
             'symbol'   => $symbol,
         ]);
     }
+
+    public function getUsdtAvailable(): float
+    {
+        // Unified account balance
+        // GET /v5/account/wallet-balance?accountType=UNIFIED&coin=USDT
+        $resp = $this->get('/v5/account/wallet-balance', [
+            'accountType' => 'UNIFIED',
+            'coin'        => 'USDT',
+        ]);
+
+        if (($resp['retCode'] ?? 1) !== 0) {
+            return 0.0;
+        }
+
+        // возможные поля: availableToWithdraw, availableBalance — страхуемся
+        $list = $resp['result']['list'][0] ?? [];
+        $coinArr = $list['coin'][0] ?? [];
+        $avail = $coinArr['availableToWithdraw']
+            ?? ($coinArr['availableBalance'] ?? 0.0);
+
+        return (float)$avail;
+    }
 }
