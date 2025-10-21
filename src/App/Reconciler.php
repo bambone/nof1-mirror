@@ -11,6 +11,12 @@ use Mirror\Infra\BybitClient;
  *  • startup_cooldown_sec — первые N секунд после запуска не торгуем
  *  • запрет перезахода в ту же сделку (по entry_oid), если вручную вышли
  *  • (опц.) перезаход только “лучше, чем entry” и пока сделка свежая
+ *
+ * Логирование:
+ *  - debug  → болтливые статусы/тех.инфо (только консоль)
+ *  - action → реальные действия: OPEN/REDUCE/FLIP/CLOSE (в файл + консоль)
+ *  - warn   → важные пропуски/ограничения (консоль)
+ *  - error  → ошибки (консоль)
  */
 final class Reconciler
 {
@@ -29,11 +35,11 @@ final class Reconciler
         $cat = $this->cfg['bybit']['account']['category'] ?? 'linear';
 
         // ===== 1) Исходные данные с NOF1 =====
-        $nof1Qty   = (float)($pos['quantity'] ?? 0.0);          // знак qty определяет сторону
-        $side      = Mapper::sideFromQty($nof1Qty);              // Buy / Sell
+        $nof1Qty   = (float)($pos['quantity'] ?? 0.0);      // знак qty определяет сторону
+        $side      = Mapper::sideFromQty($nof1Qty);          // Buy / Sell
         $entryPx   = (float)($pos['entry_price'] ?? 0.0);
-        $entryOid  = (string)($pos['entry_oid'] ?? '');          // id входа сделки на стороне NOF1
-        $entryTime = (float)($pos['entry_time'] ?? 0.0);         // unix sec
+        $entryOid  = (string)($pos['entry_oid'] ?? '');      // id входа сделки на стороне NOF1
+        $entryTime = (float)($pos['entry_time'] ?? 0.0);     // unix sec
         $tp        = $pos['exit_plan']['profit_target'] ?? null;
         $sl        = $pos['exit_plan']['stop_loss'] ?? null;
 
@@ -48,13 +54,13 @@ final class Reconciler
 
         // ===== 3) Текущая биржевая позиция =====
         $p = $this->bybit->getPositions($cat, $bybitSymbol);
-        $curQty = 0.0;
-        $curSide = null;   // "Buy"/"Sell"
-        $avgEntry = null;  // средняя цена входа на бирже
+        $curQty   = 0.0;
+        $curSide  = null;   // "Buy"/"Sell"
+        $avgEntry = null;   // средняя цена входа на бирже
         if (($p['retCode'] ?? 1) === 0 && !empty($p['result']['list'][0])) {
-            $row     = $p['result']['list'][0];
-            $curQty  = (float)($row['size'] ?? 0.0);
-            $curSide = $row['side'] ?? null;
+            $row      = $p['result']['list'][0];
+            $curQty   = (float)($row['size'] ?? 0.0);
+            $curSide  = $row['side'] ?? null;
             $avgEntry = isset($row['avgPrice']) ? (float)$row['avgPrice'] : null;
         }
 
@@ -68,7 +74,7 @@ final class Reconciler
             $this->state->set($bybitSymbol, 'last_entry_oid', $entryOid);
             $this->state->set($bybitSymbol, 'joined', false);
             $this->state->set($bybitSymbol, 'first_entry_px', $entryPx);
-            $this->log->info("🆕 {$bybitSymbol}: new entry_oid={$entryOid}, entry={$entryPx}");
+            $this->log->debug("🆕 {$bybitSymbol}: new entry_oid={$entryOid}, entry={$entryPx}");
         }
 
         $isSameEntry = ($entryOid !== '' && $lastOid === $entryOid);
@@ -93,18 +99,18 @@ final class Reconciler
         // нашей позиции нет, у NOF1 всё ещё та же сделка
         if ($curQty <= 0 && $nof1Qty !== 0.0 && $isSameEntry) {
             if (!$allowRejoin) {
-                $this->log->info("🛡️ GUARD {$bybitSymbol}: same entry_oid={$entryOid}, we exited earlier → skip until NEW entry.");
+                $this->log->debug("🛡️ guard {$bybitSymbol}: same entry_oid={$entryOid}, exited earlier → wait new entry.");
                 return;
             }
             if (!$ageOk) {
-                $this->log->info("🛡️ GUARD {$bybitSymbol}: entry too old → skip rejoin.");
+                $this->log->debug("🛡️ guard {$bybitSymbol}: entry too old → skip rejoin.");
                 return;
             }
             if ($betterPct > 0 && !$isBetterPx) {
-                $this->log->info("🛡️ GUARD {$bybitSymbol}: price not better than entry by {$betterPct}% → skip rejoin.");
+                $this->log->debug("🛡️ guard {$bybitSymbol}: price not better than entry by {$betterPct}% → skip rejoin.");
                 return;
             }
-            $this->log->info("🟢 GUARD {$bybitSymbol}: rejoin allowed (same entry, better price / age OK)");
+            $this->log->debug("🟢 guard {$bybitSymbol}: rejoin allowed (same entry, better price / age OK)");
         }
 
         // ===== 5) Базовый raw-объём =====
@@ -147,21 +153,58 @@ final class Reconciler
         // ===== 9) Флип стороны при расхождении (ONE_WAY) =====
         if ($curQty > 0 && (($curSide === 'Buy' && $side === 'Sell') || ($curSide === 'Sell' && $side === 'Buy'))) {
             $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
-            $this->log->info("🔁 Side flip on {$bybitSymbol}: closing {$curQty} first…");
+            // действие → в файл
+            $this->log->action("🔁 FLIP {$bybitSymbol}: close {$curQty} side={$closeSide}");
             $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $curQty, $closeSide, self::clid('FLIP', $bybitSymbol));
-            $this->log->info("   → close resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
+            // ответ — только в консоль
+            $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
             $curQty = 0.0;
         }
 
-        // ===== 10) Сведение позиций =====
-        $tol = (float)($this->cfg['sizing']['qty_tolerance'] ?? 0.0);
+        // ===== 10) Динамический толеранс и сведение позиций =====
+        // --- динамический толеранс (вместо фиксированного qty_tolerance) ---
+        $tolCfg   = $this->cfg['sizing']['tolerance'] ?? ['mode' => 'by_step', 'value' => 1.0];
+        $tolMode  = $tolCfg['mode']  ?? 'by_step';       // by_step | notional_usd | percent_target | absolute
+        $tolValue = (float)($tolCfg['value'] ?? 1.0);
+
+        // пер-символьное переопределение, если задано
+        if (!empty($tolCfg['per_symbol'][$bybitSymbol])) {
+            $ovr      = $tolCfg['per_symbol'][$bybitSymbol];
+            $tolMode  = $ovr['mode']  ?? $tolMode;
+            $tolValue = (float)($ovr['value'] ?? $tolValue);
+        }
+
+        $tol = 0.0;
+        switch ($tolMode) {
+            case 'by_step':
+                $tol = max($step, 1e-8) * max($tolValue, 0.0);
+                break;
+
+            case 'notional_usd':
+                if ($last > 0) {
+                    $tol = max($tolValue / $last, 0.0);
+                    $tol = Quantizer::snapQty($tol, 0.0, max($step, 1e-8));
+                }
+                break;
+
+            case 'percent_target':
+                $tol = abs($targetQty) * max($tolValue, 0.0) / 100.0;
+                $tol = Quantizer::snapQty($tol, 0.0, max($step, 1e-8));
+                break;
+
+            case 'absolute':
+            default:
+                $tol = max($tolValue, 0.0);
+                break;
+        }
+
         $diffQty = $targetQty - $curQty;
 
         if (abs($diffQty) > $tol) {
             if ($diffQty > 0) {
-                $this->log->info("📈 OPEN {$side} {$bybitSymbol} qty={$diffQty}");
+                $this->log->action("📈 OPEN {$side} {$bybitSymbol} qty={$diffQty}");
                 $resp = $this->bybit->placeMarketOrder($cat, $bybitSymbol, $side, $diffQty, self::clid('ADD', $bybitSymbol));
-                $this->log->info("   → resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
+                $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
 
                 if (($resp['retCode'] ?? -1) === 0 && $entryOid !== '') {
                     $this->state->set($bybitSymbol, 'joined', true);
@@ -170,15 +213,15 @@ final class Reconciler
             } else {
                 $closeSide = $side === 'Buy' ? 'Sell' : 'Buy';
                 $abs = abs($diffQty);
-                $this->log->info("📉 REDUCE {$bybitSymbol} qty={$abs}");
+                $this->log->action("📉 REDUCE {$bybitSymbol} qty={$abs} side={$closeSide}");
                 $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $abs, $closeSide, self::clid('REDUCE', $bybitSymbol));
-                $this->log->info("   → resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
+                $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
             }
         } else {
-            $this->log->info("✅ {$bybitSymbol}: in sync (cur={$curQty}, target={$targetQty})");
+            $this->log->debug("in sync {$bybitSymbol}: cur={$curQty}, target={$targetQty}, tol={$tol}");
         }
 
-        // ===== 11) TP/SL — только если позиция реально есть =====
+        // ===== 11) TP/SL — только если позиция реально есть (только консоль) =====
         $p2 = $this->bybit->getPositions($cat, $bybitSymbol);
         $curAfter = 0.0;
         if (($p2['retCode'] ?? 1) === 0 && !empty($p2['result']['list'][0]['size'])) {
@@ -195,9 +238,9 @@ final class Reconciler
                 $tpVal = ($this->cfg['risk']['place_tp'] ?? true) ? ($tp ?? null) : null;
                 $slVal = ($this->cfg['risk']['place_sl'] ?? true) ? ($sl ?? null) : null;
                 if ($tpVal !== null || $slVal !== null) {
-                    $this->log->info("🎯 TPSL {$bybitSymbol}: TP=" . ($tpVal ?? '—') . " SL=" . ($slVal ?? '—'));
+                    $this->log->debug("🎯 TPSL {$bybitSymbol}: TP=" . ($tpVal ?? '—') . " SL=" . ($slVal ?? '—'));
                     $r = $this->bybit->setTpSl($cat, $bybitSymbol, $tpVal ? (float)$tpVal : null, $slVal ? (float)$slVal : null);
-                    $this->log->info("   → resp: " . ($r['retMsg'] ?? 'NO_RESP'));
+                    $this->log->debug("resp: " . ($r['retMsg'] ?? 'NO_RESP'));
                 }
             }
         }
@@ -217,7 +260,7 @@ final class Reconciler
                     $curSide = $p['result']['list'][0]['side'] ?? null;
                     if ($curQty > 0) {
                         $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
-                        $this->log->info("🔚 CLOSE {$bybitSymbol} qty={$curQty} side={$closeSide} (absent in NOF1)");
+                        $this->log->action("🧹 CLOSE {$bybitSymbol} qty={$curQty} side={$closeSide} (absent in NOF1)");
                         $this->bybit->closeMarket($cat, $bybitSymbol, $curQty, $closeSide, self::clid('CLOSE', $bybitSymbol));
                         $this->state->set($bybitSymbol, 'joined', false);
                     }

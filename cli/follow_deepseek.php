@@ -1,5 +1,4 @@
 <?php
-
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -20,17 +19,23 @@ $local  = file_exists(__DIR__ . '/../config/nof1_bybit.local.php')
 // merge (bybit.local перекрывает bybit из глобального)
 $cfg = array_replace_recursive($global, $local);
 
-// Проверяем ключи перед стартом
+// Проверяем ключи перед стартом (до логгера)
 if (empty($cfg['bybit']['api_key']) || str_starts_with($cfg['bybit']['api_key'], 'PUT_')) {
     echo "❌ ERROR: Bybit API key/secret not set.\n";
     echo "→ Copy config/nof1_bybit.example.php → config/nof1_bybit.local.php and fill in your credentials.\n";
     exit(1);
 }
 
-// Логгер: пишет в файл + дублирует в консоль
+// ---------- logger ----------
+// В файл пишем только notice+ (действия/варнинги/ошибки),
+// в консоль — debug+ (всё).
+$fileLevel    = $cfg['log']['file_level']    ?? ($cfg['log']['level'] ?? 'notice');
+$consoleLevel = $cfg['log']['console_level'] ?? 'debug';
+
 $log = new Logger(
     $cfg['log']['file']  ?? __DIR__ . '/../var/deepseek_follow.log',
-    $cfg['log']['level'] ?? 'info'
+    $fileLevel,
+    $consoleLevel
 );
 
 date_default_timezone_set($cfg['app']['timezone'] ?? 'UTC');
@@ -79,19 +84,19 @@ $log->info('Press Ctrl+C to stop…');
 
 // ---------- main loop ----------
 $iteration = 0;
-$lastOkAt  = microtime(true);
 $backoffMs = 0;
 
 while ($running) {
     $iteration++;
-    $log->info("=== Tick {$iteration} @ " . date('H:i:s') . " ===");
+    // это шум — в консоль, не в файл
+    $log->debug("=== Tick {$iteration} @ " . date('H:i:s') . " ===");
 
     try {
         // 1) Тянем актуальные позиции со всех моделей
         $blocks = $nof1->fetchPositions();
 
         // 2) Ищем нужную модель
-        $present = [];
+        $present    = [];
         $modelFound = false;
 
         foreach ($blocks as $block) {
@@ -100,7 +105,7 @@ while ($running) {
 
             $posSet = $block['positions'] ?? [];
             if (!$posSet) {
-                $log->info("ℹ️ Model {$targetModel} returned no symbols.");
+                $log->debug("model {$targetModel} returned no symbols");
             }
 
             // 3) Обрабатываем каждый символ модели
@@ -109,24 +114,16 @@ while ($running) {
                     $log->debug("skip {$sym}: not mapped in symbol_map");
                     continue;
                 }
-
                 $present[] = $sym;
 
-                $entry   = $pos['entry_price'] ?? null;
-                $qty     = $pos['quantity'] ?? null;
-                $lev     = $pos['leverage'] ?? null;
-                $conf    = $pos['confidence'] ?? null;
+                // лаконичный статус — только в консоль
+                $entry = $pos['entry_price'] ?? '—';
+                $qty   = $pos['quantity'] ?? '—';
+                $lev   = $pos['leverage'] ?? '—';
+                $conf  = $pos['confidence'] ?? '—';
+                $log->debug("→ {$sym}: entry={$entry} qty={$qty} lev={$lev} conf={$conf}");
 
-                $log->info(sprintf(
-                    "→ %s: entry=%s qty=%s lev=%s conf=%s",
-                    $sym,
-                    $entry === null ? '—' : (string)$entry,
-                    $qty  === null ? '—' : (string)$qty,
-                    $lev  === null ? '—' : (string)$lev,
-                    $conf === null ? '—' : (string)$conf
-                ));
-
-                // Точная синхронизация по символу
+                // Синхронизация по символу (действия логируются внутри как notice)
                 $recon->syncSymbol($sym, $pos, $symbolMap);
             }
         }
@@ -135,15 +132,14 @@ while ($running) {
             $log->warn("⚠️ Model block '{$targetModel}' not found in positions payload.");
         }
 
-        // 4) Закрываем то, чего нет у модели
+        // 4) Закрываем то, чего нет у модели (внутри — notice)
         $recon->closeAbsentSymbols($present, $symbolMap);
 
-        $log->info("✅ Sync complete.");
-        $lastOkAt = microtime(true);
+        // итог тика — шум
+        $log->debug("✅ Sync complete.");
         $backoffMs = 0; // сбросить бэкофф после удачного шага
     } catch (\Throwable $e) {
         $log->error("❌ Error: " . $e->getMessage());
-        // подробности — в debug
         $log->debug($e->getTraceAsString());
 
         // экспоненциальный бэкофф до 5 секунд
