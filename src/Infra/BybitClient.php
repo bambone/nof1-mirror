@@ -232,13 +232,25 @@ final class BybitClient
         return $this->post('/v5/order/create', [
             'category'     => 'spot',
             'symbol'       => $symbol,
-            'side'         => $side,       // Buy / Sell
+            'side'         => $side,                  // Buy / Sell
             'orderType'    => 'Market',
+            'marketUnit'   => 'baseCurrency',         // ← ЯВНО: количество в базовой валюте
             'qty'          => (string)$qtyBase,
             'timeInForce'  => 'IOC',
             'orderLinkId'  => $clientId,
+            // НИКАКИХ флагов маржи/кредитного плеча здесь быть не должно
         ]);
     }
+
+    public function getExecutions(string $category, ?string $symbol = null, ?string $orderLinkId = null, int $limit = 50): array
+    {
+        $q = ['category' => $category, 'limit' => $limit];
+        if ($symbol)      $q['symbol'] = $symbol;
+        if ($orderLinkId) $q['orderLinkId'] = $orderLinkId;
+        return $this->get('/v5/execution/list', $q);
+    }
+
+
 
     /** Шаг/минимум лота для спота (через instruments-info с category='spot'). */
     public function getSpotLots(string $symbol): array

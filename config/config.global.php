@@ -11,19 +11,24 @@ return [
 
     // === Источник сигналов NOF1 ===
     'nof1' => [
-        // URL публичного API для получения позиций модели
-        'positions_url' => 'https://nof1.ai/api/positions?limit=1000', // legacy (fallback)
-        'account_totals_url' => 'https://nof1.ai/api/account_totals',
+        // legacy можно оставить пустым
+        'positions_url'       => null,
 
-        // ID модели, за которой следим (DeepSeek Chat v3.1)
-        'model_id'      => 'deepseek-chat-v3.1',
+        // основной эндпоинт c дефисом
+        'account_totals_url'  => 'https://nof1.ai/api/account-totals',
 
-        // Частота опроса API, мс (1000 = раз в секунду)
-        'poll_interval_ms' => 1000,
+        // если нужен токен — добавь сюда, иначе оставь null/'':
+        'auth_token'          => null,
 
-        // Таймауты HTTP-запросов
-        'connect_timeout'  => 6.0,
-        'timeout'          => 8.0,
+        // модель, за которой следим
+        'model_id'            => 'deepseek-chat-v3.1',
+
+        // опрос
+        'poll_interval_ms'    => 1000,
+
+        // таймауты HTTP
+        'connect_timeout'     => 6.0,
+        'timeout'             => 8.0,
     ],
 
     // === Настройки биржи Bybit ===
@@ -109,12 +114,13 @@ return [
         'spot_file'     => __DIR__ . '/../var/spot_scalp.log',      // спот-скальп
 
         // уровень вывода в консоль (всё подряд)
-        'console_level' => 'debug',
+        'console_level' => 'info',
 
         // уровень записи в файл:
         //  - debug, info  → пропускаются (не захламляем диск)
         //  - notice, warn, error → пишутся (только реальные действия/важные события)
         'file_level'    => 'notice',
+        'verbose_startup' => false,
     ],
 
     // === Guard-защиты и политика перезахода ===

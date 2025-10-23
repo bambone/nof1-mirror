@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -69,7 +70,8 @@ $allowNoBiasIfApiFail = (bool)($cfg['spot_scalp']['allow_no_bias_on_api_fail'] ?
 
 // === helpers ===============================================================
 
-function longBiasSymbols(array $blocks, array $symbolMap, string $modelId): array {
+function longBiasSymbols(array $blocks, array $symbolMap, string $modelId): array
+{
     $allow = [];
     foreach ($blocks as $b) {
         if (($b['id'] ?? '') !== $modelId) continue;
@@ -84,6 +86,57 @@ function longBiasSymbols(array $blocks, array $symbolMap, string $modelId): arra
 }
 
 // ==========================================================================
+
+
+// ---- после объявления $symbolMap и параметров, ПЕРЕД while(true) ----
+$quote = $cfg['bybit']['account']['symbol_quote'] ?? 'USDT';
+
+function baseCoinFromSymbol(string $sym, string $quote = 'USDT'): string
+{
+    return str_ends_with($sym, $quote) ? substr($sym, 0, -strlen($quote)) : $sym;
+}
+
+// однократный авто-подхват спотовых остатков в state
+foreach (($cfg['bybit']['symbol_map'] ?? []) as $modelSym => $bybitSymbol) {
+    $hold = $state->get($bybitSymbol, 'spot_hold', null);
+    $holdingQty = (float)($hold['qty'] ?? 0);
+
+    if ($holdingQty > 0) continue; // уже знаем про позицию
+
+    // что реально лежит на UTA по базовой монете?
+    $base = baseCoinFromSymbol($bybitSymbol, $quote);
+    $freeBase = $bybit->getAvailable('UNIFIED', $base);
+
+    if ($freeBase > 0) {
+        // берём текущий last, чтобы не слить мгновенно — в плюс продаст позже
+        $kl = $bybit->getKlines('spot', $bybitSymbol, '1', 3);
+        $rows = $kl['result']['list'] ?? [];
+        $last = $rows ? (float)end($rows)[4] : 0.0;
+
+        if ($last > 0) {
+            // аккуратно отщелкнуть по шагу лота
+            $info = $bybit->getSpotLots($bybitSymbol);
+            $step = 0.0;
+            $minQty = 0.0;
+            if (($info['retCode'] ?? 1) === 0) {
+                $f = $info['result']['list'][0]['lotSizeFilter'] ?? [];
+                $minQty = (float)($f['minOrderQty'] ?? 0.0);
+                $step   = (float)($f['qtyStep'] ?? 0.0);
+            }
+            $qty = $step > 0
+                ? Mirror\App\Quantizer::snapQty($freeBase, max($minQty, 0.0), $step)
+                : $freeBase;
+
+            if ($qty > 0) {
+                $state->set($bybitSymbol, 'spot_hold', ['qty' => $qty, 'entry' => $last]);
+                $log->info("🤝 Подхватил существующий спот {$bybitSymbol}: qty={$qty}, entry≈{$last}");
+            }
+        }
+    }
+}
+
+
+
 
 $lastAllowed = []; // кэш bias
 
@@ -152,7 +205,9 @@ while (true) {
             }
 
             // v5: [startTs, open, high, low, close, volume, turnover]
-            $lows=[]; $highs=[]; $closes=[];
+            $lows = [];
+            $highs = [];
+            $closes = [];
             foreach ($rows as $r) {
                 $highs[]  = (float)$r[2];
                 $lows[]   = (float)$r[3];
@@ -186,12 +241,23 @@ while (true) {
 
             $log->debug(sprintf(
                 "🧮 %s: min=%.6f max=%.6f last=%.6f rel=%.2f%% range=%.2f%% target≈%.2f%% costs≈%.2f%% need≈%.2f%%",
-                $bybitSymbol, $minWin, $maxWin, $last, $rel*100, $rangePct*100, $targetPct*100, $roundTripCostPct*100, $needPct*100
+                $bybitSymbol,
+                $minWin,
+                $maxWin,
+                $last,
+                $rel * 100,
+                $rangePct * 100,
+                $targetPct * 100,
+                $roundTripCostPct * 100,
+                $needPct * 100
             ));
 
             // лот-фильтры и точности СПОТА
             $info = $bybit->getSpotLots($bybitSymbol);
-            $step = 0.0; $minQty = 0.0; $basePrec = 8; $minOrderAmt = 0.0;
+            $step = 0.0;
+            $minQty = 0.0;
+            $basePrec = 8;
+            $minOrderAmt = 0.0;
             if (($info['retCode'] ?? 1) === 0 && !empty($info['result']['list'][0]['lotSizeFilter'])) {
                 $f = $info['result']['list'][0]['lotSizeFilter'];
                 $minQty      = (float)($f['minOrderQty'] ?? 0.0);
@@ -210,10 +276,9 @@ while (true) {
             $holdingEntry  = (float)($hold['entry'] ?? 0.0);
             $lastBuyTs     = (int)($state->get($bybitSymbol, 'last_buy_ts', 0) ?? 0);
             if ($holdingQty <= 0 && $lastBuyTs > 0 && (time() - $lastBuyTs) < $cooldownSec) {
-                $log->debug("🧊 {$bybitSymbol}: cooldown после BUY ещё ".( $cooldownSec - (time()-$lastBuyTs) )."s — пропуск входа");
+                $log->debug("🧊 {$bybitSymbol}: cooldown после BUY ещё " . ($cooldownSec - (time() - $lastBuyTs)) . "s — пропуск входа");
                 continue;
             }
-
             // ========== ЛОГИКА ВХОДА ==========
             if ($holdingQty <= 0) {
                 if ($rel <= 0.20) {
@@ -231,7 +296,7 @@ while (true) {
                         $qty = Quantizer::snapQty($rawQty, max($minQty, 0.0), $step);
                     } else {
                         $qty = max($rawQty, $minQty);
-                        $qty = (float)number_format($qty, $basePrec, '.', '');
+                        $qty = (float) number_format($qty, $basePrec, '.', '');
                     }
 
                     // контроль на 0
@@ -243,19 +308,42 @@ while (true) {
                     $valUsd = $qty * $last;
                     $log->debug(sprintf(
                         "✅ ВХОД-КАНДИДАТ %s: rel=%.2f%%; qty≈%s (~$%.2f) → BUY…",
-                        $bybitSymbol, $rel*100, $qty, $valUsd
+                        $bybitSymbol,
+                        $rel * 100,
+                        $qty,
+                        $valUsd
                     ));
 
-                    // BUY market (строго СПОТ)
-                    $resp = $bybit->placeSpotMarket($bybitSymbol, 'Buy', $qty, 'SPOTIN_' . date('His'));
+                    // BUY market (строго СПОТ) — используем стабильный orderLinkId
+                    $clid = 'SPOTIN_' . date('His');
+                    $resp = $bybit->placeSpotMarket($bybitSymbol, 'Buy', $qty, $clid);
+
                     if (($resp['retCode'] ?? 1) === 0) {
+                        // сохраняем удержание
                         $state->set($bybitSymbol, 'spot_hold', [
                             'qty'   => $qty,
                             'entry' => $last,
                         ]);
                         $state->set($bybitSymbol, 'last_buy_ts', time());
-                        $log->action("🟩 BUY {$bybitSymbol} qty={$qty} @~{$last} (≈$".round($valUsd,2).")");
-                        $deals->action("BUY {$bybitSymbol} qty={$qty} ~{$last} usd≈".round($valUsd,2));
+
+                        $log->action("🟩 BUY {$bybitSymbol} qty={$qty} @~{$last} (≈$" . round($valUsd, 2) . ")");
+                        $deals->action("BUY {$bybitSymbol} qty={$qty} ~{$last} usd≈" . round($valUsd, 2));
+
+                        // необязательный блок подтверждения фактических исполнений (если метод есть)
+                        if (method_exists($bybit, 'getExecutions')) {
+                            $fills = $bybit->getExecutions('spot', $bybitSymbol, $clid, 20);
+                            if (($fills['retCode'] ?? 1) === 0) {
+                                foreach ($fills['result']['list'] ?? [] as $fill) {
+                                    $px = $fill['execPrice'] ?? null;
+                                    $q  = $fill['execQty']   ?? null;
+                                    $id = $fill['execId']    ?? '';
+                                    if ($px && $q) {
+                                        $deals->action("FILL BUY {$bybitSymbol} execId={$id} qty={$q} price={$px}");
+                                    }
+                                }
+                            }
+                        }
+
                         break; // один вход за тик
                     } else {
                         $log->warn("⛔ BUY fail {$bybitSymbol}: " . ($resp['retMsg'] ?? 'NO_RESP'));
@@ -263,10 +351,12 @@ while (true) {
                 } else {
                     $log->debug(sprintf(
                         "↩️ %s: ещё высоко для входа (rel=%.2f%% > 20%% низа) — ждём",
-                        $bybitSymbol, $rel*100
+                        $bybitSymbol,
+                        $rel * 100
                     ));
                 }
             }
+
 
             // ========== ЛОГИКА ВЫХОДА ==========
             else {
@@ -276,7 +366,14 @@ while (true) {
 
                 $log->debug(sprintf(
                     "🎯 %s: hold qty=%.8f entry=%.6f last=%.6f need>=%.4f (%.2f%%) / range<=%.6f → profit=%s",
-                    $bybitSymbol, $holdingQty, $holdingEntry, $last, $needPct, $needPct*100, $takeByRange, $isProfit ? 'yes' : 'no'
+                    $bybitSymbol,
+                    $holdingQty,
+                    $holdingEntry,
+                    $last,
+                    $needPct,
+                    $needPct * 100,
+                    $takeByRange,
+                    $isProfit ? 'yes' : 'no'
                 ));
 
                 if ($isProfit && ($last >= $takeByTarget || $last >= $takeByRange)) {
