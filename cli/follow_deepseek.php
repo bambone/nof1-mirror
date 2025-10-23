@@ -43,11 +43,7 @@ $log->info('🚀 DeepSeek Mirror started');
 
 $state = new StateStore(__DIR__ . '/../var/state.json');
 
-$nof1 = new Nof1Client(
-    $cfg['nof1']['positions_url'],
-    (float)($cfg['nof1']['connect_timeout'] ?? 3.0),
-    (float)($cfg['nof1']['timeout'] ?? 7.0)
-);
+$nof1 = Nof1Client::fromConfig($cfg);
 
 $bybit = new BybitClient(
     $cfg['bybit']['base_url'],

@@ -17,6 +17,9 @@ use Mirror\Infra\BybitClient;
  *  - action → реальные действия: OPEN/REDUCE/FLIP/CLOSE (в файл + консоль)
  *  - warn   → важные пропуски/ограничения (консоль)
  *  - error  → ошибки (консоль)
+ *
+ * ВАЖНО: mirror учитывает резерв скальпа (scalp_reserved_buy), чтобы
+ * не закрывать и не уменьшать объём, выставленный доп. модулем скальпинга.
  */
 final class Reconciler
 {
@@ -35,11 +38,11 @@ final class Reconciler
         $cat = $this->cfg['bybit']['account']['category'] ?? 'linear';
 
         // ===== 1) Исходные данные с NOF1 =====
-        $nof1Qty   = (float)($pos['quantity'] ?? 0.0);      // знак qty определяет сторону
-        $side      = Mapper::sideFromQty($nof1Qty);          // Buy / Sell
+        $nof1Qty   = (float)($pos['quantity'] ?? 0.0);  // знак qty определяет сторону
+        $side      = Mapper::sideFromQty($nof1Qty);     // Buy / Sell
         $entryPx   = (float)($pos['entry_price'] ?? 0.0);
-        $entryOid  = (string)($pos['entry_oid'] ?? '');      // id входа сделки на стороне NOF1
-        $entryTime = (float)($pos['entry_time'] ?? 0.0);     // unix sec
+        $entryOid  = (string)($pos['entry_oid'] ?? ''); // id входа сделки на стороне NOF1
+        $entryTime = (float)($pos['entry_time'] ?? 0.0);
         $tp        = $pos['exit_plan']['profit_target'] ?? null;
         $sl        = $pos['exit_plan']['stop_loss'] ?? null;
 
@@ -55,8 +58,8 @@ final class Reconciler
         // ===== 3) Текущая биржевая позиция =====
         $p = $this->bybit->getPositions($cat, $bybitSymbol);
         $curQty   = 0.0;
-        $curSide  = null;   // "Buy"/"Sell"
-        $avgEntry = null;   // средняя цена входа на бирже
+        $curSide  = null;    // "Buy"/"Sell"
+        $avgEntry = null;
         if (($p['retCode'] ?? 1) === 0 && !empty($p['result']['list'][0])) {
             $row      = $p['result']['list'][0];
             $curQty   = (float)($row['size'] ?? 0.0);
@@ -64,12 +67,21 @@ final class Reconciler
             $avgEntry = isset($row['avgPrice']) ? (float)$row['avgPrice'] : null;
         }
 
+        // ===== 3.1) Учёт резерва скальпа (LONG) =====
+        // Скальпер работает только в лонг и может держать часть объёма «за собой».
+        // Мы НЕ должны его уменьшать/закрывать действиями зеркала.
+        $scalpReservedBuy = (float)$this->state->get($bybitSymbol, 'scalp_reserved_buy', 0.0);
+        // «видимый для зеркала» объём: всё, что сверх резерва
+        $mirrorVisibleQty = $curQty;
+        if ($scalpReservedBuy > 0 && $curSide === 'Buy') {
+            $mirrorVisibleQty = max($curQty - $scalpReservedBuy, 0.0);
+        }
+
         // ===== 4) GUARD: Не перезаходить в ту же сделку (по entry_oid) =====
         $guardCfg   = $this->cfg['guards'] ?? [];
         $lastOid    = (string)$this->state->get($bybitSymbol, 'last_entry_oid', '');
         $joined     = (bool)$this->state->get($bybitSymbol, 'joined', false);
 
-        // видим новый entry → запомним и сбросим joined
         if ($entryOid !== '' && $entryOid !== $lastOid) {
             $this->state->set($bybitSymbol, 'last_entry_oid', $entryOid);
             $this->state->set($bybitSymbol, 'joined', false);
@@ -97,7 +109,7 @@ final class Reconciler
             : false;
 
         // нашей позиции нет, у NOF1 всё ещё та же сделка
-        if ($curQty <= 0 && $nof1Qty !== 0.0 && $isSameEntry) {
+        if ($curQty <= 0 && (float)$nof1Qty !== 0.0 && $isSameEntry) {
             if (!$allowRejoin) {
                 $this->log->debug("🛡️ guard {$bybitSymbol}: same entry_oid={$entryOid}, exited earlier → wait new entry.");
                 return;
@@ -152,91 +164,85 @@ final class Reconciler
 
         // ===== 9) Флип стороны при расхождении (ONE_WAY) =====
         if ($curQty > 0 && (($curSide === 'Buy' && $side === 'Sell') || ($curSide === 'Sell' && $side === 'Buy'))) {
-            $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
-            $this->log->action("🔁 FLIP {$bybitSymbol}: close {$curQty} side={$closeSide}");
-            $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $curQty, $closeSide, self::clid('FLIP', $bybitSymbol));
-            $ok = (($resp['retCode'] ?? -1) === 0);
-            $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
-            $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP')); // подробности — в консоль
-            $curQty = 0.0;
+
+            // Если у нас LONG и DeepSeek хочет SELL — не закрываем резерв скальпа.
+            $closeQty = $curQty;
+            if ($curSide === 'Buy' && $side === 'Sell' && $scalpReservedBuy > 0) {
+                $closeQty = max($curQty - $scalpReservedBuy, 0.0);
+            }
+
+            if ($closeQty > 0) {
+                $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
+                $this->log->action("🔁 FLIP {$bybitSymbol}: close {$closeQty} side={$closeSide}");
+                $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $closeQty, $closeSide, self::clid('FLIP', $bybitSymbol));
+                $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
+                // curQty обновлять не обязательно — дальше считаем через mirrorVisibleQty
+            } else {
+                $this->log->debug("skip FLIP {$bybitSymbol}: only scalp-reserved long remains");
+            }
         }
 
         // ===== 10) Динамический толеранс и сведение позиций =====
-        // --- динамический толеранс (вместо фиксированного qty_tolerance) ---
+        // — толеранс
         $tolCfg   = $this->cfg['sizing']['tolerance'] ?? ['mode' => 'by_step', 'value' => 1.0];
-        $tolMode  = $tolCfg['mode']  ?? 'by_step';       // by_step | notional_usd | percent_target | absolute
+        $tolMode  = $tolCfg['mode']  ?? 'by_step';
         $tolValue = (float)($tolCfg['value'] ?? 1.0);
-
-        // пер-символьное переопределение, если задано
         if (!empty($tolCfg['per_symbol'][$bybitSymbol])) {
             $ovr      = $tolCfg['per_symbol'][$bybitSymbol];
             $tolMode  = $ovr['mode']  ?? $tolMode;
             $tolValue = (float)($ovr['value'] ?? $tolValue);
         }
-
         $tol = 0.0;
         switch ($tolMode) {
             case 'by_step':
                 $tol = max($step, 1e-8) * max($tolValue, 0.0);
                 break;
-
             case 'notional_usd':
                 if ($last > 0) {
                     $tol = max($tolValue / $last, 0.0);
                     $tol = Quantizer::snapQty($tol, 0.0, max($step, 1e-8));
                 }
                 break;
-
             case 'percent_target':
                 $tol = abs($targetQty) * max($tolValue, 0.0) / 100.0;
                 $tol = Quantizer::snapQty($tol, 0.0, max($step, 1e-8));
                 break;
-
             case 'absolute':
             default:
                 $tol = max($tolValue, 0.0);
                 break;
         }
 
-        $diffQty = $targetQty - $curQty;
+        // — дифф считаем против mirrorVisibleQty (не против полного curQty)
+        $diffQty = $targetQty - $mirrorVisibleQty;
 
         if (abs($diffQty) > $tol) {
             if ($diffQty > 0) {
-                // --- ПРОВЕРКА МИНИМАЛЬНОГО НОМИНАЛА ПЕРЕД OPEN ---
-                $minNotional = (float)($this->cfg['bybit']['account']['min_order_value_usd'] ?? 5.0);
-                if ($last > 0) {
-                    $notional = $diffQty * $last;
-                    if ($notional < $minNotional) {
-                        $this->log->debug(sprintf(
-                            'skip %s: notional %.4f < min %.2f (qty=%.8f, last=%.8f)',
-                            $bybitSymbol, $notional, $minNotional, $diffQty, $last
-                        ));
-                        return; // не пытаемся отправлять, иначе Bybit откажет
-                    }
-                }
-
+                // надо ДОБАВИТЬ: добавляем только mirror-часть, скальп-резерв не трогаем
                 $this->log->action("📈 OPEN {$side} {$bybitSymbol} qty={$diffQty}");
                 $resp = $this->bybit->placeMarketOrder($cat, $bybitSymbol, $side, $diffQty, self::clid('ADD', $bybitSymbol));
-                $ok = (($resp['retCode'] ?? -1) === 0);
-                $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
                 $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
 
-                if ($ok && $entryOid !== '') {
+                if (($resp['retCode'] ?? -1) === 0 && $entryOid !== '') {
                     $this->state->set($bybitSymbol, 'joined', true);
                     $this->state->set($bybitSymbol, 'last_entry_oid', $entryOid);
                 }
             } else {
-                // reduce
-                $closeSide = $side === 'Buy' ? 'Sell' : 'Buy';
-                $abs = abs($diffQty);
-                $this->log->action("📉 REDUCE {$bybitSymbol} qty={$abs} side={$closeSide}");
-                $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $abs, $closeSide, self::clid('REDUCE', $bybitSymbol));
-                $ok = (($resp['retCode'] ?? -1) === 0);
-                $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
-                $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
+                // надо УМЕНЬШИТЬ mirror-часть, не залезая в скальп-резерв:
+                $needReduce = abs($diffQty);
+                $reduceCap  = $mirrorVisibleQty; // столько максимум можем срезать
+                $reduceQty  = min($needReduce, $reduceCap);
+                if ($reduceQty > 0) {
+                    $closeSide = $side === 'Buy' ? 'Sell' : 'Buy';
+                    $this->log->action("📉 REDUCE {$bybitSymbol} qty={$reduceQty} side={$closeSide}");
+                    $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $reduceQty, $closeSide, self::clid('REDUCE', $bybitSymbol));
+                    $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
+                } else {
+                    $this->log->debug("skip REDUCE {$bybitSymbol}: only scalp-reserved long remains");
+                }
             }
         } else {
-            $this->log->debug("in sync {$bybitSymbol}: cur={$curQty}, target={$targetQty}, tol={$tol}");
+            $this->log->debug("in sync {$bybitSymbol}: cur={$curQty}, reserved={$scalpReservedBuy}, visible={$mirrorVisibleQty}, target={$targetQty}, tol={$tol}");
         }
 
         // ===== 11) TP/SL — только если позиция реально есть (только консоль) =====
@@ -246,7 +252,6 @@ final class Reconciler
             $curAfter = (float)$p2['result']['list'][0]['size'];
         }
 
-        // позиция ушла в ноль — сбросим joined
         if ($curAfter <= 0.0) {
             $this->state->set($bybitSymbol, 'joined', false);
         }
@@ -266,6 +271,7 @@ final class Reconciler
 
     /**
      * Закрыть всё по символам, которых нет у NOF1.
+     * (резерв скальпа не трогаем — скальп модуль сам разрулит выход)
      */
     public function closeAbsentSymbols(array $presentNof1Symbols, array $symbolMap): void
     {
@@ -276,15 +282,20 @@ final class Reconciler
                 if (($p['retCode'] ?? 1) === 0 && !empty($p['result']['list'][0]['size'])) {
                     $curQty  = (float)$p['result']['list'][0]['size'];
                     $curSide = $p['result']['list'][0]['side'] ?? null;
-                    if ($curQty > 0) {
-                        $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
-                        $this->log->action("🧹 CLOSE {$bybitSymbol} qty={$curQty} side={$closeSide} (absent in NOF1)");
-                        $resp = $this->bybit->closeMarket($cat, $bybitSymbol, $curQty, $closeSide, self::clid('CLOSE', $bybitSymbol));
-                        $ok = (($resp['retCode'] ?? -1) === 0);
-                        $this->log->action('   → ' . ($ok ? 'OK' : ('FAIL: ' . ($resp['retMsg'] ?? 'NO_RESP'))));
-                        $this->log->info("resp: " . ($resp['retMsg'] ?? 'NO_RESP'));
-                        $this->state->set($bybitSymbol, 'joined', false);
+
+                    // Не закрываем резерв скальпа при зачистке «отсутствующих»
+                    $scalpReservedBuy = (float)$this->state->get($bybitSymbol, 'scalp_reserved_buy', 0.0);
+                    $closeQty = $curQty;
+                    if ($curSide === 'Buy' && $scalpReservedBuy > 0) {
+                        $closeQty = max($curQty - $scalpReservedBuy, 0.0);
                     }
+
+                    if ($closeQty > 0) {
+                        $closeSide = ($curSide === 'Buy') ? 'Sell' : 'Buy';
+                        $this->log->action("🧹 CLOSE {$bybitSymbol} qty={$closeQty} side={$closeSide} (absent in NOF1)");
+                        $this->bybit->closeMarket($cat, $bybitSymbol, $closeQty, $closeSide, self::clid('CLOSE', $bybitSymbol));
+                    }
+                    // joined сбрасывать не обязательно, резерв держит своё
                 }
             }
         }
